@@ -1,172 +1,97 @@
 import streamlit as st
 import requests
-import os
-from datetime import datetime
 from urllib.parse import quote
 import json
 
 # --- Настройки страницы ---
 st.set_page_config(page_title="Новости Кристофера Нолана", layout="wide")
 
-st.markdown("""
-<style>
-    .stApp { background-color: #f0f2f6; }
-    body, p, .st-emotion-cache-16txtl3, .st-emotion-cache-1629p8f p, .st-emotion-cache-1xarl3l, h1, h2, h3, h4, h5, h6 {
-        color: #111111 !important;
-    }
-    .st-emotion-cache-16txtl3 { padding-top: 2rem; }
-</style>
-""", unsafe_allow_html=True)
+# Получаем ключи из секретов Streamlit
+SERPER_API_KEY = st.secrets.get("SERPER_API_KEY", "")
+OMDB_API_KEY = st.secrets.get("OMDB_API_KEY", "")
 
-# --- Функция для поиска новостей через Google (Serper.dev) ---
-@st.cache_data(ttl=1800) # Кэшируем результат на 30 минут
+# --- Функции API ---
 def fetch_google_news(search_query):
-    """Ищет новости через Google News API от Serper.dev."""
-    api_key = os.getenv("SERPER_API_KEY")
-    if not api_key:
-        return None, "Ключ SERPER_API_KEY не найден в секретах."
-
+    if not SERPER_API_KEY:
+        return None, "❌ Добавьте SERPER_API_KEY в секреты"
+    
     url = "https://google.serper.dev/news"
-    # Добавляем в запрос требование искать только за последнюю неделю для свежести
     payload = json.dumps({"q": search_query, "gl": "ru", "hl": "ru", "tbs": "qdr:w"})
-    headers = {'X-API-KEY': api_key, 'Content-Type': 'application/json'}
-
+    headers = {'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'}
+    
     try:
-        response = requests.post(url, headers=headers, data=payload)
+        response = requests.post(url, headers=headers, data=payload, timeout=10)
         if response.status_code == 200:
-            results = response.json().get("news", [])
-            return results, None
-        else:
-            return None, f"Ошибка API Serper. Статус: {response.status_code}, Ответ: {response.text}"
-    except Exception as e:
-        return None, f"Ошибка сети: {e}"
+            return response.json().get("news", []), None
+        return None, f"Ошибка API: {response.status_code}"
+    except:
+        return None, "Ошибка подключения"
 
-# === ИНТЕРФЕЙС ПРИЛОЖЕНИЯ ===
-st.title("🎬 Дайджест новостей о Кристофере Нолане")
-st.write("Автоматический поиск самых актуальных новостей о фильмах, проектах и деятельности режиссера Кристофера Нолана.")
-st.divider()
+def get_nolan_movies():
+    if not OMDB_API_KEY:
+        return None, "❌ Добавьте OMDB_API_KEY в секреты"
+    
+    movies = []
+    titles = ["Inception", "Interstellar", "The Dark Knight", "Oppenheimer", 
+              "Tenet", "Dunkirk", "Memento", "The Prestige"]
+    
+    for title in titles:
+        try:
+            url = f"http://www.omdbapi.com/?t={quote(title)}&apikey={OMDB_API_KEY}"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("Response") == "True":
+                    movies.append(data)
+        except:
+            continue
+    
+    return movies, None
 
-# --- Раздел "Последние актуальные новости" ---
-st.header("🔥 Последние релевантные новости")
+# --- Интерфейс ---
+st.title("🎬 Новости о Кристофере Нолане")
+st.write("Поиск актуальных новостей и информации о фильмах")
 
-# Каждая фраза в кавычках ищется как единое целое. Оператор OR ищет хотя бы одно совпадение.
-relevant_keywords = (
-    # Режиссер и основные проекты
-    '"Christopher Nolan" OR "Кристофер Нолан" OR "Nolan" OR '
-    # Фильмы
-    '"Inception" OR "Начало" OR "Начало (фильм)" OR '
-    '"Interstellar" OR "Интерстеллар" OR "Межзвездный" OR '
-    '"The Dark Knight" OR "Темный рыцарь" OR "Бэтмен: Темный рыцарь" OR '
-    '"Dunkirk" OR "Дюнкерк" OR '
-    '"Tenet" OR "Довод" OR "Тенет" OR '
-    '"Oppenheimer" OR "Оппенгеймер" OR '
-    '"Memento" OR "Помни" OR "Мементо" OR '
-    '"The Prestige" OR "Престиж" OR '
-    '"Insomnia" OR "Бессонница" OR '
-    # Проекты и сотрудничества
-    '"Syncopy" OR "Warner Bros" OR "Universal Pictures" OR '
-    '"IMAX" OR "70mm film" OR "пленка 70мм" OR '
-    # Награды и премии
-    '"Oscar" OR "Оскар" OR "Academy Award" OR "BAFTA" OR "БАФТА"'
-)
+# Проверка ключей
+if not SERPER_API_KEY:
+    st.error("Добавьте SERPER_API_KEY в секреты Streamlit Cloud")
+if not OMDB_API_KEY:
+    st.warning("Добавьте OMDB_API_KEY для загрузки информации о фильмах")
 
-with st.spinner("Загружаю самые релевантные новости из Google за последнюю неделю..."):
-    latest_articles, error = fetch_google_news(relevant_keywords)
+tab1, tab2 = st.tabs(["📰 Новости", "🎞️ Фильмы"])
 
-    if error:
-        st.error(error)
-    elif latest_articles:
-        st.success(f"Найдено свежих новостей: {len(latest_articles)}")
-        for article in latest_articles[:10]: # Показываем до 10 новостей
-            st.subheader(article['title'])
-            date_published_str = article.get('date', 'Дата неизвестна')
-            st.caption(f"Источник: {article['source']} | Опубликовано: {date_published_str}")
-            st.write(article.get('snippet', 'Описание отсутствует.'))
-            st.markdown(f"[*Читать далее...*]({article['link']})")
-            st.divider()
-    else:
-        st.info("Не удалось найти свежих новостей за последнюю неделю.")
+with tab1:
+    if SERPER_API_KEY:
+        search = st.text_input("Поиск новостей:", "Christopher Nolan")
+        if st.button("Искать"):
+            with st.spinner("Загружаю новости..."):
+                articles, error = fetch_google_news(search)
+                if error:
+                    st.error(error)
+                elif articles:
+                    for article in articles[:10]:
+                        with st.expander(article['title']):
+                            st.write(article.get('snippet', 'Нет описания'))
+                            st.markdown(f"[Читать →]({article['link']})")
+                else:
+                    st.info("Новостей не найдено")
 
-# --- Раздел "Индивидуальный поиск" ---
-st.header("🔍 Индивидуальный поиск")
-st.write("Ищите новости по конкретным фильмам, актерам или темам, связанным с Кристофером Ноланом.")
-
-# Примеры для пользователя
-st.info('Примеры запросов: `Cillian Murphy Nolan`, `Hans Zimmer`, `Tenet box office`, `Oppenheimer Oscar`')
-
-search_term = st.text_input("Введите ваш точный запрос для поиска:", "")
-
-if st.button("Найти"):
-    if not search_term:
-        st.warning("Пожалуйста, введите запрос для поиска.")
-    else:
-        with st.spinner(f"Ищу в Google News по запросу '{search_term}'..."):
-            articles, error = fetch_google_news(search_term)
-
+with tab2:
+    if OMDB_API_KEY:
+        with st.spinner("Загружаю фильмы..."):
+            movies, error = get_nolan_movies()
             if error:
                 st.error(error)
-            elif not articles:
-                st.info(f"Новостей по запросу '{search_term}' не найдено.")
-            else:
-                st.success(f"Найдено результатов: {len(articles)}")
-                for article in articles[:15]:
-                    st.subheader(article['title'])
-                    date_published_str = article.get('date', 'Дата неизвестна')
-                    st.caption(f"Источник: {article['source']} | Опубликовано: {date_published_str}")
-                    st.write(article.get('snippet', 'Описание отсутствует.'))
-                    st.markdown(f"[*Читать далее...*]({article['link']})")
-                    st.divider()
-
-# --- Раздел "Популярные фильмы Нолана" ---
-st.header("🎞️ Поиск по фильмам")
-st.write("Быстрый поиск новостей по конкретным фильмам Нолана")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    if st.button("Oppenheimer"):
-        st.session_state['search'] = "Oppenheimer Christopher Nolan"
-
-with col2:
-    if st.button("Interstellar"):
-        st.session_state['search'] = "Interstellar Nolan"
-
-with col3:
-    if st.button("Inception"):
-        st.session_state['search'] = "Inception Nolan"
-
-col4, col5, col6 = st.columns(3)
-
-with col4:
-    if st.button("The Dark Knight"):
-        st.session_state['search'] = '"The Dark Knight" Nolan'
-
-with col5:
-    if st.button("Tenet"):
-        st.session_state['search'] = "Tenet Nolan"
-
-with col6:
-    if st.button("Dunkirk"):
-        st.session_state['search'] = "Dunkirk Nolan"
-
-# Обработка поиска из кнопок
-if 'search' in st.session_state:
-    search_term = st.session_state['search']
-    del st.session_state['search']
-    
-    with st.spinner(f"Ищу новости по запросу '{search_term}'..."):
-        articles, error = fetch_google_news(search_term)
-        
-        if error:
-            st.error(error)
-        elif not articles:
-            st.info(f"Новостей по запросу '{search_term}' не найдено.")
-        else:
-            st.success(f"Найдено результатов: {len(articles)}")
-            for article in articles[:10]:
-                st.subheader(article['title'])
-                date_published_str = article.get('date', 'Дата неизвестна')
-                st.caption(f"Источник: {article['source']} | Опубликовано: {date_published_str}")
-                st.write(article.get('snippet', 'Описание отсутствует.'))
-                st.markdown(f"[*Читать далее...*]({article['link']})")
-                st.divider()
+            elif movies:
+                for movie in movies:
+                    st.subheader(movie.get('Title'))
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        if movie.get('Poster') != 'N/A':
+                            st.image(movie['Poster'])
+                    with col2:
+                        st.write(f"**Год:** {movie.get('Year')}")
+                        st.write(f"**Рейтинг IMDb:** {movie.get('imdbRating')}")
+                        st.write(f"**Режиссер:** {movie.get('Director')}")
+    else:
+        st.info("Добавьте OMDB_API_KEY для загрузки фильмов")
