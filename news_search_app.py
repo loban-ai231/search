@@ -147,6 +147,7 @@ def fetch_google_news(search_query):
     if not SERPER_API_KEY:
         return None, "❌ Добавьте SERPER_API_KEY в секреты"
     
+    # Проверка на релевантность для добавления имени Нолана
     relevant_keywords = ["нолан", "nolan", "кристофер", "christopher"]
     if not any(keyword in search_query.lower() for keyword in relevant_keywords):
         final_query = f"Christopher Nolan {search_query}"
@@ -154,19 +155,80 @@ def fetch_google_news(search_query):
         final_query = search_query
 
     url = "https://google.serper.dev/news"
-    payload = json.dumps({"q": final_query, "gl": "ru", "hl": "ru", "tbs": "qdr:w"})
-    headers = {'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'}
+    payload = json.dumps({
+        "q": final_query, 
+        "gl": "ru", 
+        "hl": "ru", 
+        "tbs": "qdr:w",
+        "num": 10
+    })
+    
+    headers = {
+        'X-API-KEY': SERPER_API_KEY, 
+        'Content-Type': 'application/json'
+    }
     
     try:
         response = requests.post(url, headers=headers, data=payload, timeout=10)
+        
         if response.status_code == 200:
-            google_articles = response.json().get("news", [])
+            data = response.json()
+            google_articles = data.get("news", [])
+            
+            processed_articles = []
             for article in google_articles:
-                article['source'] = article.get('source', {}).get('title', 'Google News')
-            return google_articles, None
-        return None, f"Ошибка Serper API: {response.status_code}"
+                try:
+                    # Безопасная обработка источника
+                    source_val = article.get('source', 'Google News')
+                    
+                    if isinstance(source_val, dict):
+                        source_text = source_val.get('title', 'Google News')
+                    elif isinstance(source_val, str):
+                        source_text = source_val
+                    else:
+                        source_text = 'Google News'
+                    
+                    # Безопасная обработка сниппета
+                    snippet = article.get('snippet', 'Нет описания')
+                    if not snippet or snippet == '':
+                        snippet = 'Нет описания'
+                    
+                    # Безопасная обработка заголовка
+                    title = article.get('title', 'Без заголовка')
+                    if not title or title == '':
+                        title = 'Без заголовка'
+                    
+                    # Безопасная обработка ссылки
+                    link = article.get('link', '#')
+                    
+                    processed_articles.append({
+                        'title': title[:200],  # Ограничиваем длину
+                        'snippet': snippet[:300],  # Ограничиваем длину
+                        'link': link,
+                        'source': source_text[:100]  # Ограничиваем длину
+                    })
+                    
+                except Exception as e:
+                    # Пропускаем проблемные статьи
+                    continue
+            
+            return processed_articles, None
+        
+        elif response.status_code == 401:
+            return None, "❌ Неверный API ключ Serper"
+        elif response.status_code == 429:
+            return None, "❌ Превышен лимит запросов Serper API"
+        else:
+            return None, f"❌ Ошибка Serper API: {response.status_code}"
+    
+    except requests.exceptions.Timeout:
+        return None, "❌ Таймаут подключения к Serper API"
     except requests.exceptions.RequestException as e:
-        return None, f"Ошибка подключения к Serper API: {e}"
+        return None, f"❌ Ошибка подключения к Serper API: {e}"
+    except json.JSONDecodeError as e:
+        return None, f"❌ Ошибка парсинга ответа Serper API: {e}"
+    except Exception as e:
+        return None, f"❌ Неизвестная ошибка: {e}"
 
 def get_nolan_movies():
     if not OMDB_API_KEY:
@@ -277,25 +339,34 @@ with tab1:
         google_results = []
         google_error = None
         
-        st.markdown("---")
-        
-        if SERPER_API_KEY:
-            with st.spinner("Шаг 2: Ищу актуальные новости в Google..."):
-                google_results, google_error = fetch_google_news(user_query)
-        else:
-            st.warning("Google News API не настроен, пропуск Шага 2.")
+        # После поиска в Notion и перед отображением Google News
+st.markdown("---")
 
-        if google_error:
-            st.error(f"Ошибка поиска Google: {google_error}")
-        elif google_results:
-            st.success(f"🌐 Найдено **{len(google_results)}** актуальных новостей в Google News:")
-            for article in google_results[:10]:
-                with st.expander(article['title']):
-                    st.markdown(f"**Источник:** {article.get('source', 'Google News')}")
-                    st.write(article.get('snippet', 'Нет описания'))
-                    st.markdown(f"[Читать полную статью →]({article['link']})")
-        elif SERPER_API_KEY:
-            st.info("❌ Актуальных новостей в Google News не найдено.")
+if SERPER_API_KEY:
+    with st.spinner("Шаг 2: Ищу актуальные новости в Google..."):
+        google_results, google_error = fetch_google_news(user_query)
+else:
+    st.warning("Google News API не настроен, пропуск Шага 2.")
+    google_results = []
+    google_error = None
+
+# Отображение результатов Google News
+if google_error:
+    st.error(f"Ошибка поиска Google: {google_error}")
+elif google_results:
+    st.success(f"🌐 Найдено **{len(google_results)}** актуальных новостей в Google News:")
+    
+    for i, article in enumerate(google_results[:10], 1):
+        with st.expander(f"{i}. {article['title']}"):
+            st.markdown(f"**Источник:** {article.get('source', 'Google News')}")
+            st.write(article.get('snippet', 'Нет описания'))
+            st.markdown(f"[Читать полную статью →]({article['link']})")
+    
+    # Показать, сколько результатов скрыто
+    if len(google_results) > 10:
+        st.info(f"Показано 10 из {len(google_results)} найденных новостей.")
+elif SERPER_API_KEY:
+    st.info("❌ Актуальных новостей в Google News не найдено.")
 
 with tab2:
     st.subheader("Основные фильмы Кристофера Нолана")
