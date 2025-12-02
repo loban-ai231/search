@@ -3,7 +3,7 @@ import requests
 import json
 from urllib.parse import quote
 
-st.set_page_config(page_title="Гибридный Поиск: Notion + Новости Нолана", layout="wide")
+st.set_page_config(page_title="Поиск: Notion + Новости Нолана", layout="wide")
 
 # Загрузка ключей из секретов
 SERPER_API_KEY = st.secrets.get("SERPER_API_KEY", "")
@@ -190,8 +190,8 @@ def get_nolan_movies():
     return movies, None
 
 # Интерфейс Streamlit
-st.title("🎬 Гибридный Поиск: Notion + Новости Нолана")
-st.write("Поиск по вашим страницам Notion и актуальным новостям Google. Блокирует запросы не по теме.")
+st.title("🎬Поиск: Notion + Новости Нолана")
+st.write("Поиск по вашим страницам Notion и актуальным новостям Google.")
 
 # Sidebar
 st.sidebar.header("Статус API")
