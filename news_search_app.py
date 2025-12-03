@@ -6,25 +6,45 @@ import datetime
 
 # =================== НАСТРОЙКА СТРАНИЦЫ ===================
 st.set_page_config(
-    page_title="Умный поиск по Notion",
+    page_title="Поиск по страницам Notion",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# =================== ЗАГРУЗКА КЛЮЧЕЙ ИЗ СЕКРЕТОВ ===================
-# ВАЖНО: Никогда не храните ключи прямо в коде!
+# =================== ЗАГРУЗКА КЛЮЧЕЙ ===================
 SERPER_API_KEY = st.secrets.get("SERPER_API_KEY", "")
 OMDB_API_KEY = st.secrets.get("OMDB_API_KEY", "")
 NOTION_API_KEY = st.secrets.get("NOTION_API_KEY", "")
 
-# =================== ФУНКЦИЯ ПРОВЕРКИ ПОДКЛЮЧЕНИЯ ===================
-def test_notion_connection():
-    """Проверка подключения к Notion API"""
-    if not NOTION_API_KEY:
-        return False, "❌ API ключ Notion не найден в секретах"
+# =================== ФУНКЦИИ ДЛЯ РАБОТЫ СО СТРАНИЦАМИ NOTION ===================
+def extract_text_from_blocks(blocks):
+    """Извлекает текст из блоков Notion"""
+    text_parts = []
     
-    url = "https://api.notion.com/v1/users/me"
+    for block in blocks:
+        block_type = block.get('type')
+        
+        if block_type in ['paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item', 'numbered_list_item']:
+            rich_text = block.get(block_type, {}).get('rich_text', [])
+            for text_item in rich_text:
+                if 'plain_text' in text_item:
+                    text_parts.append(text_item['plain_text'])
+        
+        # Рекурсивно обрабатываем дочерние блоки
+        if block.get('has_children', False):
+            child_blocks = block.get('children', [])
+            text_parts.extend(extract_text_from_blocks(child_blocks))
+    
+    return " ".join(text_parts)
+
+def get_page_content(page_id):
+    """Получает содержимое страницы Notion"""
+    if not NOTION_API_KEY:
+        return None, "❌ API ключ Notion не найден"
+    
+    # Получаем блоки страницы
+    url = f"https://api.notion.com/v1/blocks/{page_id}/children"
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Notion-Version": "2022-06-28"
@@ -34,46 +54,18 @@ def test_notion_connection():
         response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code == 200:
-            user_data = response.json()
-            user_name = user_data.get('name', 'Неизвестный пользователь')
-            return True, f"✅ Подключено как: {user_name}"
-        elif response.status_code == 401:
-            return False, "❌ Неверный API ключ Notion"
-        elif response.status_code == 429:
-            return False, "❌ Слишком много запросов. Подождите минуту."
+            data = response.json()
+            blocks = data.get('results', [])
+            text_content = extract_text_from_blocks(blocks)
+            return text_content, None
         else:
-            return False, f"❌ Ошибка {response.status_code}"
+            return None, f"❌ Ошибка API: {response.status_code}"
+    
     except Exception as e:
-        return False, f"❌ Ошибка подключения: {e}"
+        return None, f"❌ Ошибка подключения: {e}"
 
-# =================== ФУНКЦИЯ ПРОВЕРКИ РЕЛЕВАНТНОСТИ ===================
-def check_relevance(query):
-    """Проверка, связан ли запрос с Кристофером Ноланом"""
-    if not query:
-        return True 
-    
-    query_lower = query.lower()
-    
-    relevant_keywords = [
-        "нолан", "nolan", "кристофер", "christopher", 
-        "опенгеймер", "oppenheimer", "tenet", "интерстеллар", 
-        "inception", "темный рыцарь", "dark knight", "престиж", "prestige", 
-        "memento", "помни", "дюнкерк", "dunkirk", "бэтмен", "batman"
-    ]
-    
-    general_keywords = ["актер", "фильм", "новость", "проект", "награда", "критик", "год", "бюджет"]
-    
-    if any(keyword in query_lower for keyword in relevant_keywords):
-        return True
-    
-    if any(keyword in query_lower for keyword in general_keywords):
-        return True
-
-    return False
-
-# =================== ПОИСК В NOTION ===================
-def search_notion_pages(query, filter_by_nolan=True):
-    """Поиск по всем страницам Notion"""
+def search_in_notion_pages(query, filter_by_nolan=True):
+    """Ищет по всем страницам Notion"""
     if not NOTION_API_KEY:
         return None, "❌ API ключ Notion не найден"
     
@@ -85,7 +77,7 @@ def search_notion_pages(query, filter_by_nolan=True):
             "value": "page",
             "property": "object"
         },
-        "page_size": 15,
+        "page_size": 20,
         "sort": {
             "direction": "descending",
             "timestamp": "last_edited_time"
@@ -105,31 +97,41 @@ def search_notion_pages(query, filter_by_nolan=True):
             data = response.json()
             results = data.get("results", [])
             
-            notion_results = []
-            for item in results:
+            processed_pages = []
+            pages_to_check = min(10, len(results))  # Проверяем только первые 10 страниц
+            
+            for i, page in enumerate(results[:pages_to_check]):
                 try:
                     # Получаем ID страницы
-                    page_id = item.get('id', '')
+                    page_id = page.get('id', '')
                     
                     # Получаем заголовок страницы
                     title = "Без названия"
-                    if 'properties' in item:
-                        for prop_name, prop_value in item['properties'].items():
-                            if prop_value.get('type') == 'title':
-                                title_items = prop_value.get('title', [])
-                                if title_items:
-                                    for title_item in title_items:
-                                        if 'plain_text' in title_item:
-                                            title = title_item['plain_text']
-                                            break
-                                    if title != "Без названия":
-                                        break
+                    properties = page.get('properties', {})
+                    
+                    # Ищем заголовок в свойствах
+                    for prop_name, prop_value in properties.items():
+                        if prop_value.get('type') == 'title':
+                            title_items = prop_value.get('title', [])
+                            for title_item in title_items:
+                                if 'plain_text' in title_item:
+                                    title = title_item['plain_text']
+                                    break
+                        if title != "Без названия":
+                            break
+                    
+                    # Получаем содержимое страницы
+                    with st.spinner(f"Читаю страницу {i+1}/{pages_to_check}..."):
+                        page_content, content_error = get_page_content(page_id)
+                    
+                    if content_error:
+                        continue  # Пропускаем страницы с ошибками
                     
                     # URL страницы
-                    page_url = item.get('url', f"https://www.notion.so/{page_id.replace('-', '')}")
+                    page_url = page.get('url', f"https://www.notion.so/{page_id.replace('-', '')}")
                     
                     # Дата последнего редактирования
-                    last_edited = item.get('last_edited_time', '')
+                    last_edited = page.get('last_edited_time', '')
                     if last_edited:
                         try:
                             dt = datetime.datetime.fromisoformat(last_edited.replace('Z', '+00:00'))
@@ -137,35 +139,37 @@ def search_notion_pages(query, filter_by_nolan=True):
                         except:
                             pass
                     
-                    # Сниппет
-                    snippet = "Страница в Notion"
+                    # Создаем сниппет (первые 200 символов)
+                    snippet = page_content[:200] + "..." if len(page_content) > 200 else page_content
                     
-                    notion_results.append({
+                    processed_pages.append({
                         'title': title,
-                        'snippet': snippet,
+                        'content': page_content,
+                        'snippet': snippet if snippet else "Текст не найден",
                         'link': page_url,
                         'source': 'Notion',
                         'last_edited': last_edited,
-                        'id': page_id
+                        'id': page_id,
+                        'full_content': page_content  # Сохраняем полный текст для поиска
                     })
                     
-                except Exception:
+                except Exception as e:
                     continue
             
             # Фильтрация по теме Нолана
-            if filter_by_nolan and notion_results:
-                filtered_results = []
+            if filter_by_nolan and processed_pages:
+                filtered_pages = []
                 nolan_keywords = ["нолан", "nolan", "кристофер", "christopher", "опенгеймер", 
                                  "oppenheimer", "интерстеллар", "inception", "тенет", "tenet"]
                 
-                for result in notion_results:
-                    content = (result['title'] + " " + result['snippet']).lower()
-                    if any(keyword in content for keyword in nolan_keywords):
-                        filtered_results.append(result)
+                for page in processed_pages:
+                    search_text = (page['title'] + " " + page['content']).lower()
+                    if any(keyword in search_text for keyword in nolan_keywords):
+                        filtered_pages.append(page)
                 
-                return filtered_results, None
+                return filtered_pages, None
             
-            return notion_results, None
+            return processed_pages, None
         
         elif response.status_code == 401:
             return None, "❌ Неверный API ключ Notion"
@@ -176,6 +180,68 @@ def search_notion_pages(query, filter_by_nolan=True):
     
     except Exception as e:
         return None, f"❌ Ошибка подключения: {e}"
+
+def search_specific_pages(query, page_ids, filter_by_nolan=True):
+    """Ищет в конкретных страницах по их ID"""
+    if not NOTION_API_KEY:
+        return None, "❌ API ключ Notion не найден"
+    
+    results = []
+    
+    for page_id in page_ids[:5]:  # Ограничиваем 5 страницами для скорости
+        try:
+            # Получаем информацию о странице
+            page_url = f"https://api.notion.com/v1/pages/{page_id}"
+            headers = {
+                "Authorization": f"Bearer {NOTION_API_KEY}",
+                "Notion-Version": "2022-06-28"
+            }
+            
+            page_response = requests.get(page_url, headers=headers, timeout=5)
+            
+            if page_response.status_code == 200:
+                page_data = page_response.json()
+                
+                # Получаем заголовок
+                title = "Без названия"
+                properties = page_data.get('properties', {})
+                for prop_name, prop_value in properties.items():
+                    if prop_value.get('type') == 'title':
+                        title_items = prop_value.get('title', [])
+                        for title_item in title_items:
+                            if 'plain_text' in title_item:
+                                title = title_item['plain_text']
+                                break
+                
+                # Получаем содержимое
+                page_content, content_error = get_page_content(page_id)
+                if content_error:
+                    continue
+                
+                # Проверяем, содержит ли страница запрос
+                search_text = (title + " " + page_content).lower()
+                if query.lower() in search_text:
+                    # Фильтрация по Нолану
+                    if filter_by_nolan:
+                        nolan_keywords = ["нолан", "nolan", "кристофер", "christopher"]
+                        if not any(keyword in search_text for keyword in nolan_keywords):
+                            continue
+                    
+                    snippet = page_content[:200] + "..." if len(page_content) > 200 else page_content
+                    
+                    results.append({
+                        'title': title,
+                        'content': page_content,
+                        'snippet': snippet,
+                        'link': f"https://www.notion.so/{page_id.replace('-', '')}",
+                        'source': 'Notion',
+                        'id': page_id
+                    })
+        
+        except Exception:
+            continue
+    
+    return results, None
 
 # =================== ПОИСК НОВОСТЕЙ ===================
 def fetch_google_news(search_query):
@@ -214,7 +280,6 @@ def fetch_google_news(search_query):
             processed_articles = []
             for article in articles:
                 try:
-                    # Обработка источника
                     source_val = article.get('source', 'Google News')
                     if isinstance(source_val, dict):
                         source_text = source_val.get('title', 'Google News')
@@ -240,282 +305,146 @@ def fetch_google_news(search_query):
     except Exception as e:
         return None, f"❌ Ошибка подключения: {e}"
 
-# =================== ФИЛЬМОГРАФИЯ ===================
-def get_nolan_movies():
-    """Получение информации о фильмах Нолана"""
-    if not OMDB_API_KEY:
-        return None, "❌ API ключ OMDB не найден"
-    
-    movies = []
-    titles = ["Inception", "Interstellar", "The Dark Knight", "Oppenheimer", 
-              "Tenet", "Dunkirk", "Memento", "The Prestige"]
-    
-    for title in titles:
-        try:
-            url = f"http://www.omdbapi.com/?t={quote(title)}&apikey={OMDB_API_KEY}"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("Response") == "True":
-                    movies.append(data)
-        except:
-            continue
-    
-    return movies, None
-
 # =================== ОСНОВНОЙ ИНТЕРФЕЙС ===================
 def main():
     # Заголовок приложения
-    st.title("🔍 Умный поиск: Notion + Новости")
-    st.write("Ищет информацию в вашем Notion и актуальные новости")
+    st.title("🔍 Поиск по вашим страницам Notion")
+    st.write("Ищет текст внутри ваших страниц Notion")
     
     # ========== SIDEBAR ==========
     st.sidebar.title("⚙️ Настройки")
     
-    # Проверка подключения
-    st.sidebar.subheader("Подключение к Notion")
-    if NOTION_API_KEY:
-        if st.sidebar.button("🔍 Проверить подключение", type="primary"):
-            with st.spinner("Проверяем..."):
-                success, message = test_notion_connection()
-                if success:
-                    st.sidebar.success(message)
-                else:
-                    st.sidebar.error(message)
-    else:
-        st.sidebar.error("❌ NOTION_API_KEY не найден")
+    # Режим поиска
+    search_mode = st.sidebar.radio(
+        "Режим поиска:",
+        ["🔍 По всем страницам", "📄 По конкретным страницам"]
+    )
     
-    # Статус API
-    st.sidebar.subheader("Статус API")
-    
-    status_col1, status_col2 = st.sidebar.columns(2)
-    
-    with status_col1:
-        st.write("**Notion API:**")
-        st.write("✅" if NOTION_API_KEY else "❌")
+    # Специфические страницы
+    specific_pages = []
+    if search_mode == "📄 По конкретным страницам":
+        pages_input = st.sidebar.text_area(
+            "ID страниц Notion:",
+            placeholder="Введите ID страниц через запятую\nПример: abc123, def456, ghi789",
+            help="ID можно найти в URL страницы Notion"
+        )
         
-        st.write("**Google News:**")
-        st.write("✅" if SERPER_API_KEY else "⚠️")
+        if pages_input:
+            specific_pages = [pid.strip() for pid in pages_input.split(',') if pid.strip()]
+            st.sidebar.info(f"Загружено {len(specific_pages)} страниц")
     
-    with status_col2:
-        st.write("**Фильмы:**")
-        st.write("✅" if OMDB_API_KEY else "⚠️")
-    
-    # Настройки поиска
-    st.sidebar.subheader("Настройки поиска")
-    filter_nolan = st.sidebar.checkbox("Только про Нолана", value=True, 
-                                      help="Показывать только страницы о Кристофере Нолане")
+    # Настройки
+    filter_nolan = st.sidebar.checkbox("Только про Нолана", value=True)
     
     # Инструкция
-    with st.sidebar.expander("📖 Как пользоваться"):
+    with st.sidebar.expander("📖 Как найти ID страницы"):
         st.markdown("""
-        1. **Введите запрос** в поле поиска
-        2. **Нажмите "Найти"** для поиска
-        3. **Результаты** появятся ниже
-        
-        **Примеры запросов:**
-        - Новые проекты Нолана
-        - Интервью Кристофера
-        - Награды Опенгеймера
-        - Фильмография
+        1. Откройте страницу в Notion
+        2. Посмотрите в адресной строке:
+           ```
+           https://www.notion.so/Ваше-название-abc123def456...
+                                  ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+           Это ID страницы (32 символа)
+           ```
+        3. Скопируйте этот ID
         """)
     
-    # ========== ОСНОВНОЕ ОКНО ==========
-    # Вкладки
-    tab1, tab2, tab3 = st.tabs(["🔎 Поиск", "📚 Все страницы", "🎬 Фильмы"])
+    # ========== ПОИСКОВАЯ ФОРМА ==========
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        query = st.text_input(
+            "Введите запрос:",
+            placeholder="новости, интервью, проекты...",
+            key="search_query"
+        )
     
-    # ВКЛАДКА 1: ПОИСК
-    with tab1:
-        st.subheader("Поиск информации")
-        
-        # Поле поиска
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            query = st.text_input("Введите запрос:", 
-                                 placeholder="новости, интервью, проекты...",
-                                 key="search_query")
-        
-        with col2:
-            st.write("")
-            st.write("")
-            search_clicked = st.button("🔍 Найти", type="primary", use_container_width=True)
-        
-        if search_clicked and query:
-            # Проверка релевантности
-            if not check_relevance(query):
-                st.warning("⚠️ Этот запрос может быть не связан с Кристофером Ноланом")
-                st.info("Попробуйте: новые проекты, интервью Нолана, награды, фильмы")
+    with col2:
+        st.write("")
+        st.write("")
+        search_clicked = st.button("🔍 Найти", type="primary", use_container_width=True)
+    
+    if search_clicked and query:
+        with st.spinner("Ищем информацию..."):
+            # Поиск в Notion
+            if search_mode == "🔍 По всем страницам":
+                notion_results, notion_error = search_in_notion_pages(query, filter_by_nolan=filter_nolan)
+            else:
+                notion_results, notion_error = search_specific_pages(query, specific_pages, filter_by_nolan=filter_nolan)
             
-            # Колонки для результатов
-            col_left, col_right = st.columns(2)
+            # Поиск новостей
+            news_results, news_error = fetch_google_news(query)
+        
+        # ========== РЕЗУЛЬТАТЫ ==========
+        col_left, col_right = st.columns(2)
+        
+        # ЛЕВАЯ КОЛОНКА: Notion
+        with col_left:
+            st.markdown(f"### 📚 Ваши страницы Notion")
             
-            # ЛЕВАЯ КОЛОНКА: Notion
-            with col_left:
-                st.markdown("### 📚 Ваш Notion")
+            if notion_error:
+                st.error(f"Ошибка: {notion_error}")
+            elif notion_results:
+                st.success(f"Найдено {len(notion_results)} страниц")
                 
-                if NOTION_API_KEY:
-                    with st.spinner("Ищем в ваших страницах..."):
-                        notion_results, notion_error = search_notion_pages(query, filter_by_nolan=filter_nolan)
+                for i, page in enumerate(notion_results):
+                    with st.expander(f"{i+1}. {page['title']}", expanded=i==0):
+                        if page.get('last_edited'):
+                            st.caption(f"📅 {page['last_edited']}")
                         
-                        if notion_error:
-                            st.error(f"Ошибка: {notion_error}")
-                        elif notion_results:
-                            st.success(f"Найдено {len(notion_results)} страниц")
-                            
-                            for i, article in enumerate(notion_results[:5], 1):
-                                with st.expander(f"{i}. {article['title']}", expanded=i==1):
-                                    if article['last_edited']:
-                                        st.caption(f"📅 {article['last_edited']}")
-                                    st.write(article['snippet'])
-                                    st.markdown(f"[🔗 Открыть в Notion]({article['link']})")
+                        # Показываем сниппет с выделением запроса
+                        snippet = page['snippet']
+                        query_lower = query.lower()
+                        
+                        # Простой highlight
+                        if query_lower in snippet.lower():
+                            start_idx = snippet.lower().find(query_lower)
+                            end_idx = start_idx + len(query_lower)
+                            highlighted = (
+                                snippet[:start_idx] + 
+                                f"**{snippet[start_idx:end_idx]}**" + 
+                                snippet[end_idx:]
+                            )
+                            st.markdown(highlighted)
                         else:
-                            st.info("В вашем Notion ничего не найдено")
-                else:
-                    st.warning("Добавьте NOTION_API_KEY для поиска")
-            
-            # ПРАВАЯ КОЛОНКА: Новости
-            with col_right:
-                st.markdown("### 🌐 Новости")
-                
-                if SERPER_API_KEY:
-                    with st.spinner("Ищем новости..."):
-                        news_results, news_error = fetch_google_news(query)
+                            st.write(snippet)
                         
-                        if news_error:
-                            st.error(f"Ошибка: {news_error}")
-                        elif news_results:
-                            st.success(f"Найдено {len(news_results)} новостей")
-                            
-                            for i, article in enumerate(news_results[:5], 1):
-                                with st.expander(f"{i}. {article['title']}", expanded=i==1):
-                                    st.markdown(f"**Источник:** {article['source']}")
-                                    st.write(article['snippet'])
-                                    st.markdown(f"[📖 Читать]({article['link']})")
-                        else:
-                            st.info("Новостей не найдено")
-                else:
-                    st.info("Добавьте SERPER_API_KEY для поиска новостей")
-            
-            # Быстрые запросы
-            st.markdown("---")
-            st.subheader("💡 Попробуйте также:")
-            
-            quick_queries = ["Интервью Нолана", "Новые проекты", 
-                            "Награды Опенгеймера", "Фильмография"]
-            
-            cols = st.columns(len(quick_queries))
-            for idx, q in enumerate(quick_queries):
-                with cols[idx]:
-                    if st.button(q, key=f"quick_{idx}"):
-                        st.session_state.search_query = q
-                        st.experimental_rerun()
-    
-    # ВКЛАДКА 2: ВСЕ СТРАНИЦЫ
-    with tab2:
-        st.subheader("Все ваши страницы Notion")
+                        st.markdown(f"[🔗 Открыть в Notion]({page['link']})")
+                        
+                        # Кнопка для показа полного текста
+                        if st.button("📄 Показать полный текст", key=f"full_{i}"):
+                            st.text_area("Полный текст:", page['content'], height=200)
+            else:
+                st.info("В вашем Notion ничего не найдено")
         
-        if NOTION_API_KEY:
-            if st.button("🔄 Загрузить все страницы", type="secondary"):
-                with st.spinner("Загружаю..."):
-                    all_pages, error = search_notion_pages("", filter_by_nolan=False)
-                    
-                    if error:
-                        st.error(f"Ошибка: {error}")
-                    elif all_pages:
-                        st.success(f"Всего страниц: {len(all_pages)}")
-                        
-                        # Поиск по названию
-                        search_filter = st.text_input("Фильтр по названию:", 
-                                                     placeholder="Введите часть названия...")
-                        
-                        # Показываем страницы
-                        for page in all_pages:
-                            if not search_filter or search_filter.lower() in page['title'].lower():
-                                with st.expander(f"{page['title']}"):
-                                    if page['last_edited']:
-                                        st.caption(f"Изменено: {page['last_edited']}")
-                                    st.markdown(f"**ID:** `{page['id']}`")
-                                    st.markdown(f"[Открыть в Notion →]({page['link']})")
-                    else:
-                        st.info("Не удалось загрузить страницы")
-        else:
-            st.error("❌ NOTION_API_KEY не найден")
-    
-    # ВКЛАДКА 3: ФИЛЬМЫ
-    with tab3:
-        st.subheader("🎬 Фильмы Кристофера Нолана")
-        
-        if OMDB_API_KEY:
-            with st.spinner("Загружаю фильмы..."):
-                movies, error = get_nolan_movies()
+        # ПРАВАЯ КОЛОНКА: Новости
+        with col_right:
+            st.markdown(f"### 🌐 Новости")
+            
+            if news_error:
+                st.error(f"Ошибка: {news_error}")
+            elif news_results:
+                st.success(f"Найдено {len(news_results)} новостей")
                 
-                if error:
-                    st.error(error)
-                elif movies:
-                    # Сортируем по году
-                    movies.sort(key=lambda x: int(x.get('Year', '0')), reverse=True)
-                    
-                    for movie in movies:
-                        with st.container():
-                            col_img, col_info = st.columns([1, 3])
-                            
-                            with col_img:
-                                poster = movie.get('Poster', 'N/A')
-                                if poster != 'N/A':
-                                    st.image(poster, use_column_width=True)
-                                else:
-                                    st.markdown("""
-                                    <div style="height: 300px; display: flex; align-items: center; 
-                                                justify-content: center; background: #f0f0f0; 
-                                                border-radius: 10px;">
-                                        <span style="color: #666;">Постер отсутствует</span>
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                            
-                            with col_info:
-                                title = movie.get('Title', 'Неизвестный фильм')
-                                st.subheader(title)
-                                
-                                # Информация в колонках
-                                info_col1, info_col2, info_col3 = st.columns(3)
-                                
-                                with info_col1:
-                                    year = movie.get('Year', '?')
-                                    st.metric("Год", year)
-                                
-                                with info_col2:
-                                    rating = movie.get('imdbRating', '?')
-                                    if rating != 'N/A':
-                                        st.metric("IMDb", rating)
-                                    else:
-                                        st.metric("IMDb", "—")
-                                
-                                with info_col3:
-                                    runtime = movie.get('Runtime', '?')
-                                    st.metric("Длительность", runtime)
-                                
-                                # Дополнительная информация
-                                st.write(f"**Режиссер:** {movie.get('Director', 'Неизвестно')}")
-                                st.write(f"**Жанр:** {movie.get('Genre', 'Неизвестно')}")
-                                st.write(f"**Актеры:** {movie.get('Actors', 'Неизвестно')}")
-                                
-                                plot = movie.get('Plot', 'Нет описания')
-                                if plot != 'N/A':
-                                    st.write(f"**Описание:** {plot}")
-                            
-                            st.markdown("---")
-                else:
-                    st.info("Не удалось загрузить фильмы")
-        else:
-            st.info("Добавьте OMDB_API_KEY для показа фильмов")
+                for i, article in enumerate(news_results):
+                    with st.expander(f"{i+1}. {article['title']}", expanded=i==0):
+                        st.markdown(f"**Источник:** {article['source']}")
+                        st.write(article['snippet'])
+                        st.markdown(f"[📖 Читать]({article['link']})")
+            else:
+                st.info("Новостей не найдено")
     
-    # Футер
+    # ========== БЫСТРЫЕ ЗАПРОСЫ ==========
     st.markdown("---")
-    st.markdown("""
-    <div style="text-align: center; color: #666; font-size: 0.9em;">
-        <p>🔍 Поиск по Notion API | Ваши ключи хранятся в защищенных секретах</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.subheader("💡 Попробуйте также:")
+    
+    quick_queries = ["Интервью Нолана", "Новые проекты", "Награды", "Фильмы"]
+    
+    cols = st.columns(len(quick_queries))
+    for idx, q in enumerate(quick_queries):
+        with cols[idx]:
+            if st.button(q, key=f"quick_{idx}"):
+                st.session_state.search_query = q
+                st.rerun()
 
 # =================== ЗАПУСК ПРИЛОЖЕНИЯ ===================
 if __name__ == "__main__":
