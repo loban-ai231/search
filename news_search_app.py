@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import json
 import datetime
-import time
+import re
 
 # =================== НАСТРОЙКА СТРАНИЦЫ ===================
 st.set_page_config(
@@ -43,7 +43,6 @@ def extract_text_from_blocks(blocks):
         
         # Таблицы
         elif block_type == 'table':
-            # Получаем строки таблицы
             table_rows = block.get('table', {}).get('children', [])
             for row in table_rows:
                 cells = row.get('table_row', {}).get('cells', [])
@@ -72,20 +71,21 @@ def get_page_title(page_data):
                 for title_item in title_items:
                     if 'plain_text' in title_item:
                         return title_item['plain_text']
-            
-            # Также проверяем свойства с типом 'rich_text'
+        
+        # Если нет title, ищем в других свойствах
+        for prop_name, prop_value in properties.items():
             if prop_value.get('type') == 'rich_text':
                 rich_text = prop_value.get('rich_text', [])
                 for text_item in rich_text:
-                    if 'plain_text' in text_item:
+                    if 'plain_text' in text_item and text_item['plain_text'].strip():
                         return text_item['plain_text']
         
         return "Без названия"
     except:
         return "Без названия"
 
-def search_notion_with_fallback(query, filter_by_nolan=True):
-    """Умный поиск в Notion с несколькими стратегиями"""
+def smart_search_notion(query, search_mode="all"):
+    """Умный поиск в Notion с улучшенной логикой"""
     if not NOTION_API_KEY:
         return None, "❌ API ключ Notion не найден"
     
@@ -96,50 +96,39 @@ def search_notion_with_fallback(query, filter_by_nolan=True):
         "Notion-Version": "2022-06-28"
     }
     
-    # Стратегия 1: Поиск по всем страницам Notion
+    # Разбиваем запрос на слова, убираем стоп-слова
+    query_lower = query.lower()
+    query_words = [word for word in query_lower.split() if len(word) > 2]
+    
+    # Если запрос короткий, не фильтруем слова
+    if len(query.split()) <= 2:
+        query_words = query_lower.split()
+    
+    # Поиск через Notion Search API
     url = "https://api.notion.com/v1/search"
     
-    # Разбиваем запрос на слова
-    query_words = query.lower().split()
-    
-    # Ключевые слова для Нолана
-    nolan_keywords = ["нолан", "nolan", "кристофер", "christopher", "опенгеймер", 
-                     "oppenheimer", "интерстеллар", "inception", "тенет", "tenet", 
-                     "интерстеллар", "interstellar", "дюнкерк", "dunkirk"]
-    
-    # Функция проверки релевантности
-    def check_relevance(text):
-        text_lower = text.lower()
-        
-        # Проверяем наличие всех слов запроса
-        all_words_match = all(word in text_lower for word in query_words if len(word) > 2)
-        
-        # Проверяем фильтр по Нолану
-        nolan_match = not filter_by_nolan or any(keyword in text_lower for keyword in nolan_keywords)
-        
-        return all_words_match or nolan_match
+    # Сначала ищем по заголовкам
+    title_payload = {
+        "query": query,
+        "filter": {
+            "value": "page",
+            "property": "object"
+        },
+        "page_size": 50,
+        "sort": {
+            "direction": "descending",
+            "timestamp": "last_edited_time"
+        }
+    }
     
     try:
-        # Поиск с помощью Notion API
-        payload = {
-            "query": query,
-            "filter": {
-                "value": "page",
-                "property": "object"
-            },
-            "page_size": 20,
-            "sort": {
-                "direction": "descending",
-                "timestamp": "last_edited_time"
-            }
-        }
-        
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(url, headers=headers, json=title_payload, timeout=20)
         
         if response.status_code == 200:
             data = response.json()
             pages = data.get("results", [])
             
+            # Процессим каждую страницу
             for page in pages:
                 try:
                     # Получаем заголовок
@@ -147,19 +136,21 @@ def search_notion_with_fallback(query, filter_by_nolan=True):
                     
                     # Получаем ID и URL
                     page_id = page.get('id', '')
-                    page_url = page.get('url', f"https://www.notion.so/{page_id.replace('-', '')}")
+                    
+                    # ПРАВИЛЬНЫЙ URL - используем URL из API или строим по ID
+                    page_url = page.get('url')
+                    if not page_url or 'notion.so' not in page_url:
+                        page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
                     
                     # Получаем содержимое страницы
                     content_text, content_error = get_page_content(page_id)
-                    
-                    if content_error:
-                        # Если не удалось получить содержимое, используем только заголовок
-                        full_text = title
-                    else:
-                        full_text = title + " " + content_text
+                    full_text = title + " " + (content_text if not content_error else "")
                     
                     # Проверяем релевантность
-                    if check_relevance(full_text):
+                    relevance = calculate_relevance(full_text, query)
+                    
+                    # Если релевантность выше порога или ищем по всем
+                    if relevance > 0 or search_mode == "all":
                         # Дата последнего редактирования
                         last_edited = page.get('last_edited_time', '')
                         if last_edited:
@@ -170,10 +161,7 @@ def search_notion_with_fallback(query, filter_by_nolan=True):
                                 pass
                         
                         # Создаем сниппет
-                        snippet = create_highlighted_snippet(title, content_text, query)
-                        
-                        # Вычисляем релевантность
-                        relevance_score = calculate_relevance_score(full_text, query)
+                        snippet = create_smart_snippet(title, content_text if not content_error else "", query)
                         
                         results.append({
                             'title': title,
@@ -183,7 +171,8 @@ def search_notion_with_fallback(query, filter_by_nolan=True):
                             'source': 'Notion',
                             'last_edited': last_edited,
                             'id': page_id,
-                            'relevance': relevance_score
+                            'relevance': relevance,
+                            'found_in': "заголовок" if relevance > 0 and query.lower() in title.lower() else "содержимое"
                         })
                         
                 except Exception as e:
@@ -192,7 +181,11 @@ def search_notion_with_fallback(query, filter_by_nolan=True):
             # Сортируем по релевантности
             results.sort(key=lambda x: x['relevance'], reverse=True)
             
-            return results[:15], None  # Ограничиваем 15 результатами
+            # Если не нашли по заголовкам, пробуем более глубокий поиск
+            if not results and len(query_words) > 0:
+                return deep_content_search(query_words, headers)
+            
+            return results[:25], None
         
         elif response.status_code == 401:
             return None, "❌ Неверный API ключ Notion"
@@ -204,20 +197,87 @@ def search_notion_with_fallback(query, filter_by_nolan=True):
     except Exception as e:
         return None, f"❌ Ошибка подключения: {e}"
 
+def deep_content_search(query_words, headers):
+    """Глубокий поиск по содержимому всех страниц"""
+    results = []
+    
+    try:
+        # Получаем все страницы
+        url = "https://api.notion.com/v1/search"
+        payload = {
+            "filter": {"value": "page", "property": "object"},
+            "page_size": 100,
+            "sort": {"direction": "descending", "timestamp": "last_edited_time"}
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            all_pages = data.get("results", [])
+            
+            # Проверяем первые 30 страниц
+            for page in all_pages[:30]:
+                try:
+                    title = get_page_title(page)
+                    page_id = page.get('id', '')
+                    page_url = page.get('url', f"https://www.notion.so/{page_id.replace('-', '')}")
+                    
+                    # Получаем содержимое
+                    content, error = get_page_content(page_id)
+                    if error:
+                        continue
+                    
+                    full_text = (title + " " + content).lower()
+                    
+                    # Ищем каждое слово запроса
+                    found_words = 0
+                    for word in query_words:
+                        if word in full_text:
+                            found_words += 1
+                    
+                    # Если нашли хотя бы одно слово
+                    if found_words > 0:
+                        relevance = found_words * 10
+                        
+                        # Создаем сниппет
+                        snippet = create_smart_snippet(title, content, " ".join(query_words))
+                        
+                        results.append({
+                            'title': title,
+                            'content': content,
+                            'snippet': snippet,
+                            'link': page_url,
+                            'source': 'Notion',
+                            'id': page_id,
+                            'relevance': relevance,
+                            'found_in': "содержимое"
+                        })
+                        
+                except Exception:
+                    continue
+            
+            results.sort(key=lambda x: x['relevance'], reverse=True)
+            return results[:15], None
+    
+    except Exception:
+        pass
+    
+    return [], None
+
 def get_page_content(page_id):
     """Получает содержимое страницы Notion"""
     if not NOTION_API_KEY:
         return "", "❌ API ключ Notion не найден"
     
     try:
-        # Получаем блоки страницы
         url = f"https://api.notion.com/v1/blocks/{page_id}/children"
         headers = {
             "Authorization": f"Bearer {NOTION_API_KEY}",
             "Notion-Version": "2022-06-28"
         }
         
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         
         if response.status_code == 200:
             data = response.json()
@@ -225,48 +285,102 @@ def get_page_content(page_id):
             text_content = extract_text_from_blocks(blocks)
             return text_content, None
         else:
-            return "", f"❌ Ошибка: {response.status_code}"
+            return "", ""
     
     except Exception as e:
-        return "", f"❌ Ошибка подключения: {e}"
+        return "", ""
 
-def create_highlighted_snippet(title, content, query, max_length=300):
-    """Создает сниппет с подсветкой найденных слов"""
-    # Объединяем заголовок и содержимое для поиска
+def calculate_relevance(text, query):
+    """Вычисляет релевантность текста запросу"""
+    if not text or not query:
+        return 0
+    
+    text_lower = text.lower()
+    query_lower = query.lower()
+    
+    # Разбиваем запрос на слова
+    query_words = query_lower.split()
+    
+    # Если запрос одно слово
+    if len(query_words) == 1:
+        word = query_words[0]
+        if len(word) <= 2:
+            # Для коротких слов ищем точное вхождение
+            pattern = r'\b' + re.escape(word) + r'\b'
+            if re.search(pattern, text_lower):
+                return 100
+            elif word in text_lower:
+                return 50
+        else:
+            # Для длинных слов
+            if word in text_lower:
+                return 100
+    
+    # Для нескольких слов
+    score = 0
+    words_found = 0
+    
+    for word in query_words:
+        if len(word) > 0:
+            # Ищем слово с границами (целое слово)
+            pattern = r'\b' + re.escape(word) + r'\b'
+            if re.search(pattern, text_lower):
+                score += 30
+                words_found += 1
+            elif word in text_lower:
+                score += 15
+                words_found += 1
+    
+    # Бонус за нахождение всех слов
+    if words_found == len(query_words):
+        score += 50
+    
+    # Бонус за точную фразу
+    if query_lower in text_lower:
+        score += 100
+    
+    return score
+
+def create_smart_snippet(title, content, query, max_length=250):
+    """Создает умный сниппет с найденными словами"""
+    if not content:
+        return title[:150] + ("..." if len(title) > 150 else "")
+    
+    # Объединяем заголовок и содержимое
     full_text = title + " " + content
     full_text_lower = full_text.lower()
     query_lower = query.lower()
+    query_words = [word for word in query_lower.split() if len(word) > 0]
     
-    # Ищем все слова запроса
-    query_words = query_lower.split()
-    
-    # Находим лучшую позицию для сниппета
+    # Ищем лучшее место для сниппета
     best_position = -1
     best_score = 0
     
-    for i in range(0, len(full_text_lower) - 50):
+    for i in range(0, len(full_text_lower) - 100, 50):
+        segment = full_text_lower[i:i+200]
         score = 0
-        text_slice = full_text_lower[i:i+200]
         
-        # Считаем сколько слов запроса в этом срезе
         for word in query_words:
-            if len(word) > 2 and word in text_slice:
+            if word in segment:
                 score += 10
+                # Бонус за точное совпадение с границами слова
+                if re.search(r'\b' + re.escape(word) + r'\b', segment):
+                    score += 5
         
         if score > best_score:
             best_score = score
             best_position = i
     
-    # Если не нашли хорошей позиции, берем начало
-    if best_position == -1:
-        snippet = full_text[:max_length]
-        if len(full_text) > max_length:
+    # Если не нашли хорошее место, берем начало
+    if best_position == -1 or best_score == 0:
+        snippet = content[:max_length]
+        if len(content) > max_length:
             snippet += "..."
         return snippet
     
     # Вырезаем сниппет вокруг лучшей позиции
     start = max(0, best_position - 50)
-    end = min(len(full_text), best_position + 250)
+    end = min(len(full_text), best_position + 200)
     
     snippet = full_text[start:end]
     
@@ -276,90 +390,31 @@ def create_highlighted_snippet(title, content, query, max_length=300):
     if end < len(full_text):
         snippet = snippet + "..."
     
-    # Подсвечиваем слова запроса
+    # Подсвечиваем найденные слова
     for word in query_words:
-        if len(word) > 2:
-            # Игнорируем регистр при подсветке
-            snippet_lower = snippet.lower()
-            word_start = snippet_lower.find(word)
-            
-            while word_start != -1:
-                # Заменяем найденное слово на подсвеченную версию
-                original_word = snippet[word_start:word_start + len(word)]
-                highlighted = f"**{original_word}**"
-                
-                snippet = snippet[:word_start] + highlighted + snippet[word_start + len(word):]
-                
-                # Ищем следующее вхождение
-                snippet_lower = snippet.lower()
-                word_start = snippet_lower.find(word, word_start + len(highlighted) - 2)
+        if len(word) > 0:
+            # Используем regex для поиска слова с любыми границами
+            pattern = r'(\b' + re.escape(word) + r'\b)'
+            snippet = re.sub(pattern, r'**\1**', snippet, flags=re.IGNORECASE)
     
     return snippet
-
-def calculate_relevance_score(text, query):
-    """Вычисляет оценку релевантности"""
-    text_lower = text.lower()
-    query_lower = query.lower()
-    query_words = query_lower.split()
-    
-    score = 0
-    
-    # Бонус за точное совпадение фразы
-    if query_lower in text_lower:
-        score += 100
-    
-    # Бонус за каждое слово
-    for word in query_words:
-        if len(word) > 2:
-            # В заголовке
-            if word in text_lower:
-                score += 30
-            # В содержимом
-            count = text_lower.count(word)
-            score += min(count, 5) * 10
-    
-    # Бонус за близость слов друг к другу
-    if len(query_words) > 1:
-        # Ищем позиции всех слов
-        positions = []
-        for word in query_words:
-            if len(word) > 2:
-                pos = text_lower.find(word)
-                if pos != -1:
-                    positions.append(pos)
-        
-        # Если нашли несколько слов, вычисляем их близость
-        if len(positions) > 1:
-            positions.sort()
-            total_distance = sum(positions[i+1] - positions[i] for i in range(len(positions)-1))
-            if total_distance < 100:  # Слова близко друг к другу
-                score += 50
-    
-    return score
 
 def fetch_google_news(search_query):
     """Поиск новостей через Serper API"""
     if not SERPER_API_KEY:
         return None, "❌ API ключ Serper не найден"
     
-    # Добавляем "Christopher Nolan" если запрос не содержит ключевых слов
-    relevant_keywords = ["нолан", "nolan", "кристофер", "christopher"]
-    if not any(keyword in search_query.lower() for keyword in relevant_keywords):
-        final_query = f"Christopher Nolan {search_query}"
-    else:
-        final_query = search_query
-
     url = "https://google.serper.dev/news"
     payload = json.dumps({
-        "q": final_query, 
-        "gl": "ru", 
-        "hl": "ru", 
+        "q": search_query,
+        "gl": "ru",
+        "hl": "ru",
         "tbs": "qdr:w",
-        "num": 8
+        "num": 6
     })
     
     headers = {
-        'X-API-KEY': SERPER_API_KEY, 
+        'X-API-KEY': SERPER_API_KEY,
         'Content-Type': 'application/json'
     }
     
@@ -382,10 +437,10 @@ def fetch_google_news(search_query):
                         source_text = 'Google News'
                     
                     processed_articles.append({
-                        'title': article.get('title', 'Без заголовка')[:200],
-                        'snippet': article.get('snippet', 'Нет описания')[:300],
+                        'title': article.get('title', 'Без заголовка')[:150],
+                        'snippet': article.get('snippet', 'Нет описания')[:200],
                         'link': article.get('link', '#'),
-                        'source': source_text[:100]
+                        'source': source_text[:80]
                     })
                     
                 except Exception:
@@ -402,73 +457,63 @@ def fetch_google_news(search_query):
 def main():
     # Заголовок приложения
     st.title("🔍 Улучшенный поиск по Notion")
-    st.markdown("Ищет по **названиям и содержимому** ваших страниц Notion")
+    st.markdown("Ищет по **названиям и содержимому** ваших страниц")
     
     # ========== SIDEBAR ==========
-    st.sidebar.title("⚙️ Настройки поиска")
+    st.sidebar.title("⚙️ Настройки")
     
-    # Настройки
+    # Статус API
+    st.sidebar.subheader("🔑 Статус API")
+    
     col1, col2 = st.sidebar.columns(2)
     
     with col1:
-        filter_nolan = st.checkbox("Только Нолан", value=True,
-                                 help="Показывать только связанное с Кристофером Ноланом")
-    
-    with col2:
-        search_mode = st.selectbox(
-            "Режим поиска",
-            ["📝 Быстрый (только заголовки)", "🔍 Глубокий (заголовки + содержимое)"],
-            index=1
-        )
-    
-    # Статистика API
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔑 Статус API")
-    
-    status_col1, status_col2 = st.sidebar.columns(2)
-    
-    with status_col1:
         st.write("**Notion:**")
         st.write("✅" if NOTION_API_KEY else "❌")
-        
+    
+    with col2:
         st.write("**Google News:**")
         st.write("✅" if SERPER_API_KEY else "⚠️")
     
-    with status_col2:
-        st.write("**Фильмы:**")
-        st.write("✅" if OMDB_API_KEY else "⚠️")
+    # Режим поиска
+    st.sidebar.subheader("🔍 Режим поиска")
+    search_mode = st.sidebar.radio(
+        "Тип поиска:",
+        ["📝 Быстрый (только заголовки)", "🔍 Глубокий (заголовки + содержимое)"],
+        index=1
+    )
     
     # Инструкция
     with st.sidebar.expander("📖 Как пользоваться"):
         st.markdown("""
         ### 🔍 **Что ищет:**
-        1. **В заголовках** всех ваших страниц Notion
-        2. **В содержимом** страниц (текст, списки, таблицы)
-        3. **В новостях** о Кристофере Нолане
+        1. **В заголовках** всех страниц
+        2. **В тексте** внутри страниц
+        3. **Отдельные слова** и **фразы**
+        4. **Короткие слова** (2+ буквы)
         
-        ### ✨ **Особенности:**
-        - **Подсвечивает** найденные слова
-        - **Сортирует** по релевантности
-        - **Показывает** ссылки на страницы Notion
-        - **Кэширует** результаты для скорости
+        ### ✨ **Примеры:**
+        - `звезда` - найдет "звезда", "звёзды", "звездный"
+        - `один` - найдет "один", "однажды", "первый"
+        - `новый проект` - найдет оба слова
         
-        ### 💡 **Советы:**
-        - Используйте **ключевые слова**
-        - **Цитируйте** точные фразы
-        - **Фильтруйте** по тематике Нолана
+        ### ⚡ **Советы:**
+        - Используйте **конкретные слова**
+        - **Не используйте** стоп-слова (и, в, на)
+        - Для точной фразы - **вводите полностью**
         """)
     
     # ========== ПОИСКОВАЯ ФОРМА ==========
     st.markdown("---")
     
-    col1, col2 = st.columns([4, 1])
+    col1, col2, col3 = st.columns([4, 1, 1])
     
     with col1:
         query = st.text_input(
             "Введите запрос:",
-            placeholder="Например: 'новый проект', 'интервью 2024', 'награды'...",
+            placeholder="Например: звезда, один из, новый проект...",
             key="search_query",
-            help="Ищет по названиям и содержимому страниц"
+            help="Ищет отдельные слова и фразы"
         )
     
     with col2:
@@ -476,14 +521,20 @@ def main():
         st.write("")
         search_clicked = st.button("🔍 Найти", type="primary", use_container_width=True)
     
+    with col3:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Очистить", use_container_width=True):
+            st.session_state.search_query = ""
+            st.rerun()
+    
     if search_clicked and query:
-        # Индикатор поиска
         with st.spinner(f"🔍 Ищу '{query}'..."):
-            # Задержка для плавности
-            time.sleep(0.5)
+            # Определяем режим поиска
+            mode = "deep" if "Глубокий" in search_mode else "title"
             
             # Поиск в Notion
-            notion_results, notion_error = search_notion_with_fallback(query, filter_by_nolan=filter_nolan)
+            notion_results, notion_error = smart_search_notion(query, mode)
             
             # Поиск новостей
             news_results, news_error = fetch_google_news(query)
@@ -491,118 +542,213 @@ def main():
         # ========== РЕЗУЛЬТАТЫ ==========
         if notion_error:
             st.error(f"**Ошибка Notion:** {notion_error}")
-        elif news_error:
-            st.warning(f"**Новости:** {news_error}")
         
         # Notion результаты
-        st.subheader(f"📚 Страницы Notion ({len(notion_results) if notion_results else 0})")
-        
         if notion_results:
-            # Показать первые 10 результатов
-            for i, page in enumerate(notion_results[:10]):
-                with st.expander(f"**{i+1}. {page['title']}**", expanded=i < 2):
-                    # Метаинформация
-                    meta_col1, meta_col2 = st.columns(2)
-                    
-                    with meta_col1:
-                        if page.get('last_edited'):
-                            st.caption(f"📅 {page['last_edited']}")
-                    
-                    with meta_col2:
-                        st.caption(f"⭐ Релевантность: {page['relevance']}")
-                    
-                    # Сниппет с подсветкой
-                    st.markdown("**Найдено:**")
-                    st.markdown(page['snippet'])
-                    
-                    # Ссылки
-                    link_col1, link_col2 = st.columns(2)
-                    
-                    with link_col1:
-                        st.markdown(f"[🔗 Открыть в Notion]({page['link']})")
-                    
-                    with link_col2:
-                        # Кнопка для показа полного текста
-                        if page['content'] and st.button(f"📄 Показать текст", key=f"text_{i}"):
-                            st.text_area("Содержимое страницы:", page['content'][:1000], height=200)
-                    
-                    st.markdown("---")
-        else:
-            st.info("😔 В ваших страницах Notion ничего не найдено")
+            st.subheader(f"📚 Найдено в Notion: {len(notion_results)} страниц")
+            
+            # Группируем по релевантности
+            high_relevance = [r for r in notion_results if r['relevance'] >= 50]
+            medium_relevance = [r for r in notion_results if 20 <= r['relevance'] < 50]
+            low_relevance = [r for r in notion_results if r['relevance'] < 20]
+            
+            # Показываем высокорелевантные
+            if high_relevance:
+                st.markdown("##### 🔥 Высокая релевантность:")
+                for i, page in enumerate(high_relevance[:5]):
+                    with st.expander(f"**{i+1}. {page['title']}**", expanded=True):
+                        show_page_result(page, query)
+            
+            # Показываем среднюю релевантность
+            if medium_relevance:
+                st.markdown("##### ⭐ Средняя релевантность:")
+                for i, page in enumerate(medium_relevance[:5]):
+                    with st.expander(f"**{i+1}. {page['title']}**", expanded=False):
+                        show_page_result(page, query)
+            
+            # Показываем низкую релевантность
+            if low_relevance and len(high_relevance + medium_relevance) < 3:
+                st.markdown("##### 💡 Низкая релевантность:")
+                for i, page in enumerate(low_relevance[:3]):
+                    with st.expander(f"**{i+1}. {page['title']}**", expanded=False):
+                        show_page_result(page, query)
+        
+        elif NOTION_API_KEY:
+            st.info("😔 По вашему запросу ничего не найдено")
+            st.markdown("""
+            **Возможные причины:**
+            - Слова запроса нет в ваших страницах
+            - Страницы не содержат текст
+            - API не имеет доступа к страницам
+            
+            **Попробуйте:**
+            - Другие слова или синонимы
+            - Более общие запросы
+            - Проверить доступ интеграции к страницам
+            """)
         
         # Новости
         st.markdown("---")
         st.subheader(f"🌐 Новости ({len(news_results) if news_results else 0})")
         
         if news_results:
-            for i, article in enumerate(news_results[:5]):
+            for i, article in enumerate(news_results):
                 with st.expander(f"**{i+1}. {article['title']}**"):
                     st.markdown(f"**📰 Источник:** {article['source']}")
                     st.write(article['snippet'])
-                    st.markdown(f"[📖 Читать статью →]({article['link']})")
+                    st.markdown(f"[📖 Читать →]({article['link']})")
         else:
-            st.info("📰 Новостей по запросу не найдено")
+            st.info("📰 Новостей не найдено")
         
         # Быстрые запросы
         st.markdown("---")
         st.subheader("💡 Попробуйте также:")
         
         quick_queries = [
-            ("🎬 Новые проекты", "Что сейчас снимает Нолан"),
-            ("🏆 Награды", "Оскар и другие премии"),
-            ("📰 Интервью", "Последние интервью режиссера"),
-            ("🎞️ Фильмография", "Все фильмы Кристофера Нолана"),
-            ("🤝 Коллаборации", "С кем работает Нолан"),
-            ("📅 График", "Планы и расписание")
+            ("🌟 Звезда", "звезда"),
+            ("1️⃣ Один", "один"),
+            ("📝 Текст", "текст"),
+            ("📅 Дата", "дата"),
+            ("🔗 Ссылка", "ссылка"),
+            ("📄 Документ", "документ")
         ]
         
         cols = st.columns(3)
-        for idx, (title, desc) in enumerate(quick_queries):
+        for idx, (title, query_text) in enumerate(quick_queries):
             with cols[idx % 3]:
                 if st.button(title, key=f"quick_{idx}"):
-                    st.session_state.search_query = desc
+                    st.session_state.search_query = query_text
                     st.rerun()
     
     # ========== ПРИ ПУСТОМ ПОИСКЕ ==========
     else:
-        st.markdown("---")
-        
-        # Примеры
-        st.subheader("✨ Примеры запросов:")
-        
-        examples = [
-            ("🎬 Новые фильмы", "Что сейчас в работе у Нолана?"),
-            ("🏆 Оскар 2024", "Награды за Опенгеймер"),
-            ("📰 Интервью", "Последние выступления режиссера"),
-            ("🎞️ Фильмография", "Все работы Кристофера Нолана"),
-            ("🤝 Актеры", "С кем работает Нолан"),
-            ("📅 Расписание", "Планы на будущее")
-        ]
-        
-        for title, desc in examples:
-            if st.button(f"{title}: {desc}", key=f"example_{title}"):
-                st.session_state.search_query = desc
-                st.rerun()
-        
-        st.markdown("---")
-        
-        # Статистика
-        st.info("""
-        **📊 Возможности поиска:**
-        - Ищет в **названиях** всех ваших страниц Notion
-        - Ищет в **содержимом** страниц (текст, списки, таблицы)
-        - **Подсвечивает** найденные слова
-        - **Сортирует** по релевантности
-        - Показывает **актуальные новости**
-        """)
+        show_welcome_screen()
+
+# =================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===================
+def show_page_result(page, query):
+    """Показывает результат поиска по странице"""
+    # Метаинформация
+    col1, col2 = st.columns(2)
     
-    # ========== ФУТЕР ==========
+    with col1:
+        if page.get('last_edited'):
+            st.caption(f"📅 {page['last_edited']}")
+    
+    with col2:
+        if page.get('found_in'):
+            st.caption(f"📍 Найдено в: {page['found_in']}")
+    
+    # Сниппет
+    if page['snippet']:
+        st.markdown("**Найдено:**")
+        
+        # Показываем сниппет с подсветкой
+        snippet_html = page['snippet']
+        
+        # Добавляем больше контекста если нужно
+        if len(page['snippet']) < 100 and page['content']:
+            # Находим больше текста вокруг
+            content_lower = page['content'].lower()
+            query_lower = query.lower()
+            
+            # Ищем первое вхождение
+            pos = content_lower.find(query_lower)
+            if pos != -1:
+                start = max(0, pos - 100)
+                end = min(len(page['content']), pos + 200)
+                extra_snippet = page['content'][start:end]
+                
+                if start > 0:
+                    extra_snippet = "..." + extra_snippet
+                if end < len(page['content']):
+                    extra_snippet = extra_snippet + "..."
+                
+                # Подсвечиваем запрос
+                for word in query_lower.split():
+                    if len(word) > 2:
+                        extra_snippet = re.sub(
+                            r'(\b' + re.escape(word) + r'\b)',
+                            r'**\1**',
+                            extra_snippet,
+                            flags=re.IGNORECASE
+                        )
+                
+                snippet_html = extra_snippet
+        
+        st.markdown(snippet_html)
+    
+    # Ссылка на страницу
+    st.markdown(f"")
+    
+    link_col1, link_col2 = st.columns(2)
+    
+    with link_col1:
+        # ПРЯМАЯ ССЫЛКА НА КОНКРЕТНУЮ СТРАНИЦУ
+        if page['link']:
+            st.markdown(f"[🔗 Открыть страницу в Notion]({page['link']})")
+        else:
+            st.markdown(f"[🔗 Открыть страницу в Notion](https://www.notion.so/{page['id'].replace('-', '')})")
+    
+    with link_col2:
+        if page['content'] and len(page['content']) > 50:
+            if st.button("📄 Показать больше текста", key=f"more_{page['id']}"):
+                # Показываем первые 500 символов
+                preview = page['content'][:500]
+                if len(page['content']) > 500:
+                    preview += "..."
+                
+                # Подсвечиваем запрос
+                for word in query.lower().split():
+                    if len(word) > 2:
+                        preview = re.sub(
+                            r'(\b' + re.escape(word) + r'\b)',
+                            r'**\1**',
+                            preview,
+                            flags=re.IGNORECASE
+                        )
+                
+                st.markdown("**Полный текст:**")
+                st.markdown(preview)
+
+def show_welcome_screen():
+    """Показывает приветственный экран"""
     st.markdown("---")
-    st.markdown("""
-    <div style="text-align: center; color: #666; font-size: 0.9em; padding: 10px;">
-        <p>🔍 Поиск по Notion | Ищет в названиях и содержимом | Автоматически подсвечивает найденное</p>
-    </div>
-    """, unsafe_allow_html=True)
+    
+    # Примеры
+    st.subheader("✨ Примеры запросов:")
+    
+    examples = [
+        ("🌟 Звезда", "Найдет 'звезда', 'звёзды', 'звездный'"),
+        ("1️⃣ Один", "Найдет 'один', 'однажды', 'первый'"),
+        ("📝 Любой текст", "Найдет слова в содержимом страниц"),
+        ("📅 Конкретная дата", "Найдет даты в тексте"),
+        ("🔗 Ссылки", "Найдет упоминания ссылок"),
+        ("📄 Документы", "Найдет документы и файлы")
+    ]
+    
+    for title, desc in examples:
+        if st.button(f"{title}: {desc}", key=f"welcome_{title}"):
+            st.session_state.search_query = title.split(":")[0].strip()
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # Информация
+    st.info("""
+    **🔍 Возможности поиска:**
+    - Ищет **отдельные слова** (от 2 букв)
+    - Находит **словосочетания**
+    - Ищет **в заголовках** и **внутри текста**
+    - **Подсвечивает** найденное
+    - **Сортирует** по релевантности
+    - **Прямые ссылки** на страницы Notion
+    """)
+    
+    # Статистика
+    if NOTION_API_KEY:
+        st.success("✅ Notion API подключен")
+    else:
+        st.warning("⚠️ Notion API не настроен")
 
 # =================== ЗАПУСК ПРИЛОЖЕНИЯ ===================
 if __name__ == "__main__":
