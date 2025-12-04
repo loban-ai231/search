@@ -185,7 +185,7 @@ def smart_search_notion(query, search_mode="all"):
             if not results and len(query_words) > 0:
                 return deep_content_search(query_words, headers)
             
-            return results[:25], None
+            return results[:50], None
         
         elif response.status_code == 401:
             return None, "❌ Неверный API ключ Notion"
@@ -258,7 +258,7 @@ def deep_content_search(query_words, headers):
                     continue
             
             results.sort(key=lambda x: x['relevance'], reverse=True)
-            return results[:15], None
+            return results[:30], None
     
     except Exception:
         pass
@@ -483,6 +483,12 @@ def main():
         index=1
     )
     
+    # Лимит отображения
+    st.sidebar.subheader("📊 Лимиты")
+    limit_high = st.sidebar.slider("Высокая релевантность", 0, 50, 50, help="Макс. страниц для показа")
+    limit_medium = st.sidebar.slider("Средняя релевантность", 0, 50, 50, help="Макс. страниц для показа")
+    limit_low = st.sidebar.slider("Низкая релевантность", 0, 50, 50, help="Макс. страниц для показа")
+    
     # Инструкция
     with st.sidebar.expander("📖 Как пользоваться"):
         st.markdown("""
@@ -533,33 +539,52 @@ def main():
         
         # Notion результаты
         if notion_results:
-            st.subheader(f"📚 Найдено в Notion: {len(notion_results)} страниц")
+            total_found = len(notion_results)
+            st.subheader(f"📚 Найдено в Notion: {total_found} страниц")
             
-            # Группируем по релевантности
+            # Статистика по релевантности
             high_relevance = [r for r in notion_results if r['relevance'] >= 50]
             medium_relevance = [r for r in notion_results if 20 <= r['relevance'] < 50]
             low_relevance = [r for r in notion_results if r['relevance'] < 20]
             
+            # Отображаем статистику
+            col_stats1, col_stats2, col_stats3 = st.columns(3)
+            with col_stats1:
+                st.metric("🔥 Высокая", len(high_relevance))
+            with col_stats2:
+                st.metric("⭐ Средняя", len(medium_relevance))
+            with col_stats3:
+                st.metric("💡 Низкая", len(low_relevance))
+            
             # Показываем высокорелевантные
             if high_relevance:
                 st.markdown("##### 🔥 Высокая релевантность:")
-                for i, page in enumerate(high_relevance[:5]):
-                    with st.expander(f"**{i+1}. {page['title']}**", expanded=True):
-                        show_page_result(page, query)
+                shown_high = 0
+                for i, page in enumerate(high_relevance):
+                    if shown_high < limit_high:
+                        with st.expander(f"**{i+1}. {page['title']}** - Релевантность: {page['relevance']}%", expanded=(i == 0)):
+                            show_page_result(page, query)
+                        shown_high += 1
             
             # Показываем среднюю релевантность
             if medium_relevance:
                 st.markdown("##### ⭐ Средняя релевантность:")
-                for i, page in enumerate(medium_relevance[:5]):
-                    with st.expander(f"**{i+1}. {page['title']}**", expanded=False):
-                        show_page_result(page, query)
+                shown_medium = 0
+                for i, page in enumerate(medium_relevance):
+                    if shown_medium < limit_medium:
+                        with st.expander(f"**{i+1}. {page['title']}** - Релевантность: {page['relevance']}%", expanded=False):
+                            show_page_result(page, query)
+                        shown_medium += 1
             
             # Показываем низкую релевантность
-            if low_relevance and len(high_relevance + medium_relevance) < 3:
+            if low_relevance:
                 st.markdown("##### 💡 Низкая релевантность:")
-                for i, page in enumerate(low_relevance[:3]):
-                    with st.expander(f"**{i+1}. {page['title']}**", expanded=False):
-                        show_page_result(page, query)
+                shown_low = 0
+                for i, page in enumerate(low_relevance):
+                    if shown_low < limit_low:
+                        with st.expander(f"**{i+1}. {page['title']}** - Релевантность: {page['relevance']}%", expanded=False):
+                            show_page_result(page, query)
+                        shown_low += 1
         
         elif NOTION_API_KEY:
             st.info("😔 По вашему запросу ничего не найдено")
@@ -587,10 +612,6 @@ def main():
                     st.markdown(f"[📖 Читать →]({article['link']})")
         else:
             st.info("📰 Новостей не найдено")
-        
-        # Быстрые запросы - УБРАНО
-        # st.markdown("---")
-        # st.subheader("💡 Попробуйте также:")
         
     # ========== ПРИ ПУСТОМ ПОИСКЕ ==========
     else:
@@ -650,7 +671,7 @@ def show_page_result(page, query):
         st.markdown(snippet_html)
     
     # Ссылка на страницу
-    st.markdown(f"")
+    st.markdown("")
     
     link_col1, link_col2 = st.columns(2)
     
@@ -686,9 +707,6 @@ def show_welcome_screen():
     """Показывает приветственный экран"""
     st.markdown("---")
     
-    # Примеры - УБРАНО
-    # st.subheader("✨ Примеры запросов:")
-    
     # Информация
     st.info("""
     **🔍 Возможности поиска:**
@@ -698,6 +716,7 @@ def show_welcome_screen():
     - **Подсвечивает** найденное
     - **Сортирует** по релевантности
     - **Прямые ссылки** на страницы Notion
+    - Показывает **все найденные страницы**
     """)
     
     # Статистика
